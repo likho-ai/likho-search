@@ -2,10 +2,8 @@ package app_test
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -18,7 +16,6 @@ import (
 	searchv1 "github.com/likho-ai/likho-contracts/packages/go/gen/likho/search/v1"
 	"github.com/likho-ai/likho-contracts/packages/go/gen/likho/search/v1/searchv1connect"
 	transcriptionv1 "github.com/likho-ai/likho-contracts/packages/go/gen/likho/transcription/v1"
-	"golang.org/x/net/http2"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/likho-ai/likho-search/internal/app"
@@ -89,12 +86,9 @@ func start(t *testing.T, transcripts *fakeTranscripts) running {
 			_ = ix.Drop(context.Background())
 		}
 	})
-	httpClient := &http.Client{Transport: &http2.Transport{
-		AllowHTTP: true,
-		DialTLSContext: func(ctx context.Context, network, address string, _ *tls.Config) (net.Conn, error) {
-			return (&net.Dialer{}).DialContext(ctx, network, address)
-		},
-	}}
+	protocols := new(http.Protocols)
+	protocols.SetUnencryptedHTTP2(true)
+	httpClient := &http.Client{Transport: &http.Transport{Protocols: protocols}}
 	client := searchv1connect.NewSearchServiceClient(httpClient, "http://"+service.GRPCAddr(), connect.WithGRPC())
 	return running{app: service, client: client, bus: service.Bus()}
 }

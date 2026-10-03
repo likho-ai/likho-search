@@ -4,19 +4,16 @@ package indexer
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 	"time"
 
 	"connectrpc.com/connect"
 	transcriptionv1 "github.com/likho-ai/likho-contracts/packages/go/gen/likho/transcription/v1"
 	"github.com/likho-ai/likho-contracts/packages/go/gen/likho/transcription/v1/transcriptionv1connect"
-	"golang.org/x/net/http2"
 
 	"github.com/likho-ai/likho-search/internal/events"
 	"github.com/likho-ai/likho-search/internal/index"
@@ -30,15 +27,10 @@ type Transcripts interface {
 // NewTranscriptsClient connects to likho-transcription over gRPC: HTTP/2 without TLS, as the
 // services talk inside the cluster.
 func NewTranscriptsClient(addr string, timeout time.Duration) Transcripts {
-	client := &http.Client{
-		Timeout: timeout,
-		Transport: &http2.Transport{
-			AllowHTTP: true,
-			DialTLSContext: func(ctx context.Context, network, address string, _ *tls.Config) (net.Conn, error) {
-				return (&net.Dialer{}).DialContext(ctx, network, address)
-			},
-		},
-	}
+	// HTTP/2 without TLS (h2c) over a plain TCP connection.
+	protocols := new(http.Protocols)
+	protocols.SetUnencryptedHTTP2(true)
+	client := &http.Client{Timeout: timeout, Transport: &http.Transport{Protocols: protocols}}
 	return transcriptionv1connect.NewTranscriptionServiceClient(client, "http://"+addr, connect.WithGRPC())
 }
 
