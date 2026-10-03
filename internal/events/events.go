@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -38,8 +39,10 @@ type Handler func(ctx context.Context, event Event) error
 
 // Bus is the connection to the event bus.
 type Bus struct {
-	conn      *nats.Conn
-	js        jetstream.JetStream
+	conn *nats.Conn
+	js   jetstream.JetStream
+
+	mu        sync.Mutex // guards the two lists: Take runs in the service's goroutine, Close and Forget in another
 	consumers []jetstream.ConsumeContext
 	durables  [][2]string // stream, consumer name
 }
@@ -104,8 +107,10 @@ func (b *Bus) Take(ctx context.Context, stream, subject, group string, handle Ha
 	if err != nil {
 		return fmt.Errorf("event bus: consume %s: %w", name, err)
 	}
+	b.mu.Lock()
 	b.consumers = append(b.consumers, consuming)
 	b.durables = append(b.durables, [2]string{stream, name})
+	b.mu.Unlock()
 	log.Info("taking " + subject + " as " + name)
 	return nil
 }
@@ -125,19 +130,25 @@ func (b *Bus) Publish(ctx context.Context, subject string, id string, event any)
 // Forget deletes the durable consumers this connection created (tests, which use names of
 // their own; a real instance leaves its consumers for the next instance to continue from).
 func (b *Bus) Forget(ctx context.Context) {
-	for _, c := range b.consumers {
+	b.mu.Lock()
+	consumers, durables := b.consumers, b.durables
+	b.consumers, b.durables = nil, nil
+	b.mu.Unlock()
+	for _, c := range consumers {
 		c.Stop()
 	}
-	b.consumers = nil
-	for _, d := range b.durables {
+	for _, d := range durables {
 		_ = b.js.DeleteConsumer(ctx, d[0], d[1])
 	}
-	b.durables = nil
 }
 
 // Close stops the consumers and closes the connection.
 func (b *Bus) Close() {
-	for _, c := range b.consumers {
+	b.mu.Lock()
+	consumers := b.consumers
+	b.consumers = nil
+	b.mu.Unlock()
+	for _, c := range consumers {
 		c.Stop()
 	}
 	b.conn.Close()
