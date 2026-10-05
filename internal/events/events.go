@@ -49,7 +49,27 @@ type Bus struct {
 
 // Connect opens the connection and checks that the streams exist.
 func Connect(ctx context.Context, url string) (*Bus, error) {
-	conn, err := nats.Connect(url, nats.Name(Source), nats.MaxReconnects(-1))
+	// While NATS is not there yet (it may be starting at the same time) keep trying until ctx
+	// ends; once connected, the client reconnects on its own.
+	wait := time.Second
+	for {
+		bus, err := open(ctx, url)
+		if err == nil {
+			return bus, nil
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, fmt.Errorf("the event bus at %s did not answer in time: %w", url, err)
+		case <-timer.C:
+		}
+		wait = min(wait*2, 10*time.Second)
+	}
+}
+
+func open(ctx context.Context, url string) (*Bus, error) {
+	conn, err := nats.Connect(url, nats.Name(Source), nats.MaxReconnects(-1), nats.Timeout(5*time.Second))
 	if err != nil {
 		return nil, fmt.Errorf("event bus: %w", err)
 	}
@@ -62,7 +82,7 @@ func Connect(ctx context.Context, url string) (*Bus, error) {
 		if _, err := js.Stream(ctx, stream); err != nil {
 			conn.Close()
 			if errors.Is(err, jetstream.ErrStreamNotFound) {
-				return nil, fmt.Errorf("stream %s does not exist on %s; create the streams first (likho-infra: scripts/up.sh)", stream, url)
+				return nil, fmt.Errorf("stream %s does not exist; create the streams first (likho-infra: scripts/up.sh)", stream)
 			}
 			return nil, fmt.Errorf("event bus: %w", err)
 		}

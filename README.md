@@ -35,6 +35,8 @@ do; `.env.<environment>.local` for secrets).
 | --- | --- | --- |
 | `HTTP_PORT`, `GRPC_PORT` | 4040, 5040 | `/healthz` and `/readyz`; `likho.search.v1.SearchService` |
 | `NATS_URL` | `nats://localhost:4222` | The event bus |
+| `NATS_CONNECT_TIMEOUT_SECONDS` | `120` | How long the start keeps trying to reach NATS before giving up |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | empty | Also push the metrics there (OTLP/HTTP); `GET /metrics` (calls by method and status with how long they took, transcripts and lines indexed) is always on |
 | `MEILI_URL`, `MEILI_API_KEY` | the local stack's | Meilisearch (the key is refused as a development one in staging and production) |
 | `INDEX_NAME` | `segments` | The index |
 | `TRANSCRIPTION_GRPC_ADDR` | `localhost:5020` | Where transcripts are fetched from |

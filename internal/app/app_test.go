@@ -3,6 +3,7 @@ package app_test
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -181,4 +182,15 @@ func TestEventsKeepTheIndexCurrent(t *testing.T) {
 		t.Fatalf("readyz: %v %v", resp, err)
 	}
 	_ = resp.Body.Close()
+
+	// Metrics: Prometheus text with the calls answered above.
+	resp, err = http.Get("http://" + r.app.HTTPAddr() + "/metrics")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("metrics: %v %v", resp, err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if !strings.Contains(string(body), "likho_search_requests_total") || !strings.Contains(string(body), "likho_search_segments_indexed_total") {
+		t.Fatalf("metrics: %s", body)
+	}
 }

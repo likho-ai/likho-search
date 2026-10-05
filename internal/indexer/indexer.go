@@ -17,6 +17,7 @@ import (
 
 	"github.com/likho-ai/likho-search/internal/events"
 	"github.com/likho-ai/likho-search/internal/index"
+	"github.com/likho-ai/likho-search/internal/metrics"
 )
 
 // Transcripts is where transcripts come from (likho-transcription's gRPC service).
@@ -36,6 +37,7 @@ func NewTranscriptsClient(addr string, timeout time.Duration) Transcripts {
 
 // Indexer turns transcripts into indexed lines.
 type Indexer struct {
+	metrics     *metrics.Metrics
 	index       *index.Index
 	transcripts Transcripts
 	log         *slog.Logger
@@ -48,7 +50,26 @@ func New(ix *index.Index, transcripts Transcripts, log *slog.Logger) *Indexer {
 
 // Reindex fetches a transcript and replaces the recording's lines with it. It returns how
 // many lines are now indexed.
+// WithMetrics counts the transcripts and lines indexed.
+func (in *Indexer) WithMetrics(m *metrics.Metrics) *Indexer {
+	in.metrics = m
+	return in
+}
+
 func (in *Indexer) Reindex(ctx context.Context, transcriptID, workspaceID string) (int, error) {
+	n, err := in.reindex(ctx, transcriptID, workspaceID)
+	if in.metrics != nil {
+		if err != nil {
+			in.metrics.Reindexes.Add(ctx, 1, metrics.Outcome("failed"))
+		} else {
+			in.metrics.Reindexes.Add(ctx, 1, metrics.Outcome("indexed"))
+			in.metrics.SegmentsIndexed.Add(ctx, int64(n))
+		}
+	}
+	return n, err
+}
+
+func (in *Indexer) reindex(ctx context.Context, transcriptID, workspaceID string) (int, error) {
 	if transcriptID == "" || workspaceID == "" {
 		return 0, errors.New("a transcript id and a workspace id are required")
 	}

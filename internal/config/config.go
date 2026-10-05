@@ -19,6 +19,10 @@ type Config struct {
 	GRPCPort int // likho.search.v1.SearchService
 
 	NATSURL string
+	// NATSConnectTimeout is how long the start keeps trying to reach NATS before giving up.
+	NATSConnectTimeout time.Duration
+	// OTLPEndpoint is where metrics are pushed as well (OTLP/HTTP); empty = only GET /metrics.
+	OTLPEndpoint string
 
 	MeiliURL    string
 	MeiliAPIKey string
@@ -79,6 +83,8 @@ func Load() (Config, error) {
 		HTTPPort:              number("HTTP_PORT", 4040),
 		GRPCPort:              number("GRPC_PORT", 5040),
 		NATSURL:               text("NATS_URL", "nats://localhost:4222"),
+		NATSConnectTimeout:    time.Duration(number("NATS_CONNECT_TIMEOUT_SECONDS", 120)) * time.Second,
+		OTLPEndpoint:          text("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
 		MeiliURL:              strings.TrimRight(text("MEILI_URL", "http://localhost:7700"), "/"),
 		MeiliAPIKey:           text("MEILI_API_KEY", "likho-dev-master-key"),
 		IndexName:             text("INDEX_NAME", "segments"),

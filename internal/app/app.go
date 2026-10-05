@@ -17,11 +17,12 @@ import (
 	"github.com/likho-ai/likho-search/internal/events"
 	"github.com/likho-ai/likho-search/internal/index"
 	"github.com/likho-ai/likho-search/internal/indexer"
+	"github.com/likho-ai/likho-search/internal/metrics"
 	"github.com/likho-ai/likho-search/internal/rpc"
 )
 
 // Version of the service, shown in the start-up log line.
-const Version = "0.1.0"
+const Version = "0.2.0"
 
 // App is the running service.
 type App struct {
@@ -73,9 +74,16 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger, options Optio
 	if transcripts == nil {
 		transcripts = indexer.NewTranscriptsClient(cfg.TranscriptionGRPCAddr, cfg.RPCTimeout)
 	}
-	in := indexer.New(ix, transcripts, log)
+	meters, err := metrics.New(ctx, "likho-search", Version, cfg.OTLPEndpoint)
+	if err != nil {
+		_ = httpListener.Close()
+		_ = grpcListener.Close()
+		return fail(err)
+	}
+	in := indexer.New(ix, transcripts, log).WithMetrics(meters)
 
 	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", meters.Handler())
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("ok\n"))
 	})
@@ -104,7 +112,7 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger, options Optio
 		httpListener: httpListener,
 		grpcListener: grpcListener,
 		httpServer:   &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second},
-		grpcServer:   &http.Server{Handler: rpcMux, Protocols: protocols, ReadHeaderTimeout: 10 * time.Second},
+		grpcServer:   &http.Server{Handler: meters.Timed(rpcMux), Protocols: protocols, ReadHeaderTimeout: 10 * time.Second},
 		health:       health,
 	}, nil
 }
