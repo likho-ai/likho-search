@@ -24,6 +24,7 @@ const (
 	CompletedSubject        = "likho.transcription.completed"
 	CorrectedSubject        = "likho.transcript.corrected"
 	RecordingDeletedSubject = "likho.recording.deleted"
+	RecordingUpdatedSubject = "likho.recording.updated"
 )
 
 // Event is a CloudEvents 1.0 envelope with the data still raw.

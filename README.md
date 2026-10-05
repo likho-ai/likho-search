@@ -7,8 +7,9 @@ typo tolerance, because Hinglish is spelled many ways.
 | It does | How |
 | --- | --- |
 | Keeps the index current | Listens to `likho.transcription.completed` and `likho.transcript.corrected`, fetches the transcript from likho-transcription, stores one document per line |
+| Knows the facts of a recording | Listens to `likho.recording.updated` (likho-api: source, campaign, agent, disposition, when the call happened) and keeps them on every line of the recording, whichever arrives first |
 | Forgets deleted recordings | Listens to `likho.recording.deleted` |
-| Answers searches | `Search(workspace, query, …)` - a page of lines, best first, matches wrapped in `<mark>` |
+| Answers searches | `Search(workspace, query, …)` - a page of lines, best first, matches wrapped in `<mark>`; narrowed by language, recording, campaign, agent, disposition, source, a window on the call time |
 | Takes orders | `Reindex(transcript)`, `DeleteRecording(recording)` |
 
 Go, [Connect](https://connectrpc.com) (which also answers plain gRPC), Meilisearch, NATS JetStream.
@@ -16,10 +17,13 @@ Go, [Connect](https://connectrpc.com) (which also answers plain gRPC), Meilisear
 ## What is indexed
 
 One transcript per recording - the latest. A line is
-`{id, transcript_id, recording_id, workspace_id, idx, start, end, text_roman, text_script, language, created_at}`;
+`{id, transcript_id, recording_id, workspace_id, idx, start, end, text_roman, text_script, language, created_at, source, campaign, agent, disposition, call_time}`;
 `text_roman` and `text_script` are searched, the rest filters (workspace, recording, language,
-a time window). A search is always inside one workspace. Names, dialer ids and the other facts
-about a recording are likho-api's: it decorates the hits it gets from here.
+a window on the transcript's time, and the recording's facts with a window on the call's time).
+A search is always inside one workspace. The facts come from `likho.recording.updated` and are
+kept in a second index (`<INDEX_NAME>_recordings`), so lines indexed before the facts arrive
+are given them, and lines indexed after get them at once. Names, dialer ids and the rest of a
+recording are likho-api's: it decorates the hits it gets from here with the current ones.
 
 ## Run it
 

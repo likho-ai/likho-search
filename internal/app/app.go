@@ -22,7 +22,7 @@ import (
 )
 
 // Version of the service, shown in the start-up log line.
-const Version = "0.2.0"
+const Version = "0.3.0"
 
 // App is the running service.
 type App struct {

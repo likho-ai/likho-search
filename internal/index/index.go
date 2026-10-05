@@ -29,6 +29,29 @@ type Line struct {
 	Language     string  `json:"language"`
 	// CreatedAt is the transcript's creation time as Unix seconds, so a window can be filtered.
 	CreatedAt int64 `json:"created_at"`
+	// The recording's facts (likho.recording.updated), copied onto every line so a search can be
+	// narrowed by them. CallTime is Unix seconds: the dialer's call time, else the recording's.
+	Source      string `json:"source"`
+	Campaign    string `json:"campaign"`
+	Agent       string `json:"agent"`
+	Disposition string `json:"disposition"`
+	CallTime    int64  `json:"call_time"`
+}
+
+// Facts is what is known about a recording besides its lines.
+type Facts struct {
+	RecordingID string `json:"id"`
+	WorkspaceID string `json:"workspace_id"`
+	Source      string `json:"source"`
+	Campaign    string `json:"campaign"`
+	Agent       string `json:"agent"`
+	Disposition string `json:"disposition"`
+	CallTime    int64  `json:"call_time"`
+}
+
+// apply copies the facts onto a line.
+func (f Facts) apply(line *Line) {
+	line.Source, line.Campaign, line.Agent, line.Disposition, line.CallTime = f.Source, f.Campaign, f.Agent, f.Disposition, f.CallTime
 }
 
 // Hit is a matching line with the matches marked.
@@ -48,6 +71,13 @@ type Query struct {
 	Until       time.Time // zero = no upper bound
 	Page        int       // 1-based
 	PageSize    int
+	// The recording's facts: exact values, empty = any; a window on when the call happened.
+	Source      string
+	Campaign    string
+	Agent       string
+	Disposition string
+	CallSince   time.Time
+	CallUntil   time.Time
 }
 
 // Result is a page of hits.
@@ -59,46 +89,137 @@ type Result struct {
 	ProcessingMs int
 }
 
-// Index is the connection to one Meilisearch index.
+// Index is the connection to one Meilisearch index of lines, with a second one beside it that
+// holds the facts of each recording (so lines indexed later get them, and lines indexed earlier
+// can be given them).
 type Index struct {
 	client meilisearch.ServiceManager
 	index  meilisearch.IndexManager
+	facts  meilisearch.IndexManager
 	name   string
 }
 
-// Open connects to Meilisearch and makes sure the index exists with the right settings.
+// Open connects to Meilisearch and makes sure the indexes exist with the right settings.
 func Open(ctx context.Context, url, apiKey, name string, maxHits int) (*Index, error) {
 	client := meilisearch.New(url, meilisearch.WithAPIKey(apiKey))
 	if _, err := client.HealthWithContext(ctx); err != nil {
 		return nil, fmt.Errorf("meilisearch at %s: %w", url, err)
 	}
-	ix := &Index{client: client, index: client.Index(name), name: name}
+	ix := &Index{client: client, index: client.Index(name), facts: client.Index(name + "_recordings"), name: name}
 	if err := ix.ensure(ctx, maxHits); err != nil {
 		return nil, err
 	}
 	return ix, nil
 }
 
-// ensure creates the index if needed and applies the settings (idempotent).
+// ensure creates the indexes if needed and applies the settings (idempotent).
 func (ix *Index) ensure(ctx context.Context, maxHits int) error {
-	if _, err := ix.client.GetIndexWithContext(ctx, ix.name); err != nil {
-		task, err := ix.client.CreateIndexWithContext(ctx, &meilisearch.IndexConfig{Uid: ix.name, PrimaryKey: "id"})
-		if err != nil {
-			return fmt.Errorf("meilisearch: create index %s: %w", ix.name, err)
-		}
-		if err := ix.wait(ctx, task.TaskUID); err != nil {
-			return err
+	for _, name := range []string{ix.name, ix.name + "_recordings"} {
+		if _, err := ix.client.GetIndexWithContext(ctx, name); err != nil {
+			task, err := ix.client.CreateIndexWithContext(ctx, &meilisearch.IndexConfig{Uid: name, PrimaryKey: "id"})
+			if err != nil {
+				return fmt.Errorf("meilisearch: create index %s: %w", name, err)
+			}
+			if err := ix.wait(ctx, task.TaskUID); err != nil {
+				return err
+			}
 		}
 	}
 	task, err := ix.index.UpdateSettingsWithContext(ctx, &meilisearch.Settings{
 		SearchableAttributes: []string{"text_roman", "text_script"},
-		FilterableAttributes: []string{"workspace_id", "recording_id", "transcript_id", "language", "created_at"},
-		SortableAttributes:   []string{"created_at", "start"},
-		DisplayedAttributes:  []string{"*"},
-		Pagination:           &meilisearch.Pagination{MaxTotalHits: int64(maxHits)},
+		FilterableAttributes: []string{
+			"workspace_id", "recording_id", "transcript_id", "language", "created_at",
+			"source", "campaign", "agent", "disposition", "call_time",
+		},
+		SortableAttributes:  []string{"created_at", "start", "call_time"},
+		DisplayedAttributes: []string{"*"},
+		Pagination:          &meilisearch.Pagination{MaxTotalHits: int64(maxHits)},
 	})
 	if err != nil {
 		return fmt.Errorf("meilisearch: settings of %s: %w", ix.name, err)
+	}
+	if err := ix.wait(ctx, task.TaskUID); err != nil {
+		return err
+	}
+	task, err = ix.facts.UpdateSettingsWithContext(ctx, &meilisearch.Settings{
+		SearchableAttributes: []string{},
+		FilterableAttributes: []string{"workspace_id"},
+		DisplayedAttributes:  []string{"*"},
+	})
+	if err != nil {
+		return fmt.Errorf("meilisearch: settings of %s_recordings: %w", ix.name, err)
+	}
+	return ix.wait(ctx, task.TaskUID)
+}
+
+// PutFacts stores what is known about a recording and gives its lines, if any are indexed, the
+// same facts.
+func (ix *Index) PutFacts(ctx context.Context, facts Facts) error {
+	if facts.RecordingID == "" {
+		return errors.New("a recording id is required")
+	}
+	task, err := ix.facts.AddDocumentsWithContext(ctx, []Facts{facts}, nil)
+	if err != nil {
+		return fmt.Errorf("meilisearch: facts of %s: %w", facts.RecordingID, err)
+	}
+	if err := ix.wait(ctx, task.TaskUID); err != nil {
+		return err
+	}
+	return ix.applyFacts(ctx, facts)
+}
+
+// GetFacts returns what is known about a recording, or false when nothing is.
+func (ix *Index) GetFacts(ctx context.Context, recordingID string) (Facts, bool, error) {
+	var facts Facts
+	err := ix.facts.GetDocumentWithContext(ctx, recordingID, nil, &facts)
+	if err != nil {
+		var meiliErr *meilisearch.Error
+		if errors.As(err, &meiliErr) && meiliErr.StatusCode == 404 {
+			return Facts{}, false, nil
+		}
+		return Facts{}, false, fmt.Errorf("meilisearch: facts of %s: %w", recordingID, err)
+	}
+	return facts, true, nil
+}
+
+// applyFacts patches every indexed line of the recording with the facts.
+func (ix *Index) applyFacts(ctx context.Context, facts Facts) error {
+	type patch struct {
+		ID          string `json:"id"`
+		Source      string `json:"source"`
+		Campaign    string `json:"campaign"`
+		Agent       string `json:"agent"`
+		Disposition string `json:"disposition"`
+		CallTime    int64  `json:"call_time"`
+	}
+	var patches []patch
+	for offset := int64(0); ; offset += 1000 {
+		var page meilisearch.DocumentsResult
+		err := ix.index.GetDocumentsWithContext(ctx, &meilisearch.DocumentsQuery{
+			Filter: "recording_id = " + quote(facts.RecordingID), Fields: []string{"id"}, Limit: 1000, Offset: offset,
+		}, &page)
+		if err != nil {
+			return fmt.Errorf("meilisearch: lines of %s: %w", facts.RecordingID, err)
+		}
+		for _, raw := range page.Results {
+			var line struct {
+				ID string `json:"id"`
+			}
+			if err := raw.DecodeInto(&line); err != nil {
+				return err
+			}
+			patches = append(patches, patch{line.ID, facts.Source, facts.Campaign, facts.Agent, facts.Disposition, facts.CallTime})
+		}
+		if int64(len(page.Results)) < 1000 {
+			break
+		}
+	}
+	if len(patches) == 0 {
+		return nil
+	}
+	task, err := ix.index.UpdateDocumentsWithContext(ctx, patches, nil)
+	if err != nil {
+		return fmt.Errorf("meilisearch: update lines of %s: %w", facts.RecordingID, err)
 	}
 	return ix.wait(ctx, task.TaskUID)
 }
@@ -110,12 +231,22 @@ func (ix *Index) Ping(ctx context.Context) error {
 }
 
 // Replace stores the lines of one transcript, removing every line the recording had before.
+// The recording's facts, when known, go onto every line.
 func (ix *Index) Replace(ctx context.Context, recordingID string, lines []Line) error {
-	if err := ix.DeleteRecording(ctx, recordingID); err != nil {
+	if err := ix.deleteLines(ctx, recordingID); err != nil {
 		return err
 	}
 	if len(lines) == 0 {
 		return nil
+	}
+	facts, known, err := ix.GetFacts(ctx, recordingID)
+	if err != nil {
+		return err
+	}
+	if known {
+		for i := range lines {
+			facts.apply(&lines[i])
+		}
 	}
 	task, err := ix.index.AddDocumentsWithContext(ctx, lines, nil)
 	if err != nil {
@@ -124,8 +255,19 @@ func (ix *Index) Replace(ctx context.Context, recordingID string, lines []Line) 
 	return ix.wait(ctx, task.TaskUID)
 }
 
-// DeleteRecording forgets every line of a recording.
+// DeleteRecording forgets every line of a recording, and its facts.
 func (ix *Index) DeleteRecording(ctx context.Context, recordingID string) error {
+	if err := ix.deleteLines(ctx, recordingID); err != nil {
+		return err
+	}
+	task, err := ix.facts.DeleteDocumentWithContext(ctx, recordingID, nil)
+	if err != nil {
+		return fmt.Errorf("meilisearch: delete facts of %s: %w", recordingID, err)
+	}
+	return ix.wait(ctx, task.TaskUID)
+}
+
+func (ix *Index) deleteLines(ctx context.Context, recordingID string) error {
 	task, err := ix.index.DeleteDocumentsByFilterWithContext(ctx, "recording_id = "+quote(recordingID), nil)
 	if err != nil {
 		return fmt.Errorf("meilisearch: delete lines of %s: %w", recordingID, err)
@@ -180,6 +322,17 @@ func (ix *Index) Search(ctx context.Context, q Query) (Result, error) {
 	if !q.Until.IsZero() {
 		filter = append(filter, fmt.Sprintf("created_at <= %d", q.Until.Unix()))
 	}
+	for field, value := range map[string]string{"source": q.Source, "campaign": q.Campaign, "agent": q.Agent, "disposition": q.Disposition} {
+		if value != "" {
+			filter = append(filter, field+" = "+quote(value))
+		}
+	}
+	if !q.CallSince.IsZero() {
+		filter = append(filter, fmt.Sprintf("call_time >= %d", q.CallSince.Unix()))
+	}
+	if !q.CallUntil.IsZero() {
+		filter = append(filter, fmt.Sprintf("call_time <= %d", q.CallUntil.Unix()))
+	}
 	hitsPerPage := int64(size)
 	response, err := ix.index.SearchWithContext(ctx, q.Text, &meilisearch.SearchRequest{
 		Filter:                strings.Join(filter, " AND "),
@@ -213,13 +366,18 @@ func (ix *Index) Search(ctx context.Context, q Query) (Result, error) {
 	return result, nil
 }
 
-// Drop deletes the whole index (tests).
+// Drop deletes both indexes (tests).
 func (ix *Index) Drop(ctx context.Context) error {
-	task, err := ix.client.DeleteIndexWithContext(ctx, ix.name)
-	if err != nil {
-		return err
+	for _, name := range []string{ix.name, ix.name + "_recordings"} {
+		task, err := ix.client.DeleteIndexWithContext(ctx, name)
+		if err != nil {
+			return err
+		}
+		if err := ix.wait(ctx, task.TaskUID); err != nil {
+			return err
+		}
 	}
-	return ix.wait(ctx, task.TaskUID)
+	return nil
 }
 
 func (ix *Index) wait(ctx context.Context, taskUID int64) error {

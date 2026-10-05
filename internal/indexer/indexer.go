@@ -111,7 +111,48 @@ func Lines(transcript *transcriptionv1.Transcript, workspaceID string) []index.L
 	return lines
 }
 
-// Listen takes the three events from the bus.
+// FactsOf turns a likho.recording.updated event into the facts kept beside the lines: the
+// source and the campaign, agent and disposition attributes, and when the call happened.
+func FactsOf(data []byte) (index.Facts, error) {
+	var event struct {
+		RecordingID string            `json:"recording_id"`
+		WorkspaceID string            `json:"workspace_id"`
+		Source      string            `json:"source"`
+		CallTime    string            `json:"call_time"`
+		Attributes  map[string]string `json:"attributes"`
+	}
+	if err := json.Unmarshal(data, &event); err != nil {
+		return index.Facts{}, err
+	}
+	if event.RecordingID == "" || event.WorkspaceID == "" {
+		return index.Facts{}, errors.New("a recording id and a workspace id are required")
+	}
+	facts := index.Facts{
+		RecordingID: event.RecordingID,
+		WorkspaceID: event.WorkspaceID,
+		Source:      event.Source,
+		Campaign:    event.Attributes["campaign"],
+		Agent:       event.Attributes["agent"],
+		Disposition: event.Attributes["disposition"],
+	}
+	if event.CallTime != "" {
+		if at, err := time.Parse(time.RFC3339, event.CallTime); err == nil {
+			facts.CallTime = at.Unix()
+		}
+	}
+	return facts, nil
+}
+
+// Update stores a recording's facts and gives its lines the same.
+func (in *Indexer) Update(ctx context.Context, facts index.Facts) error {
+	if err := in.index.PutFacts(ctx, facts); err != nil {
+		return err
+	}
+	in.log.Info("facts kept", "recording", facts.RecordingID, "campaign", facts.Campaign, "agent", facts.Agent)
+	return nil
+}
+
+// Listen takes the four events from the bus.
 func (in *Indexer) Listen(ctx context.Context, bus *events.Bus, group string) error {
 	byTranscript := func(ctx context.Context, event events.Event) error {
 		var data struct {
@@ -140,7 +181,17 @@ func (in *Indexer) Listen(ctx context.Context, bus *events.Bus, group string) er
 	if err := bus.Take(ctx, events.StreamEvents, events.CompletedSubject, group, byTranscript, in.log); err != nil {
 		return err
 	}
+	updated := func(ctx context.Context, event events.Event) error {
+		facts, err := FactsOf(event.Data)
+		if err != nil {
+			return fmt.Errorf("event %s: %w", event.ID, err)
+		}
+		return in.Update(ctx, facts)
+	}
 	if err := bus.Take(ctx, events.StreamKeep, events.CorrectedSubject, group, byTranscript, in.log); err != nil {
+		return err
+	}
+	if err := bus.Take(ctx, events.StreamEvents, events.RecordingUpdatedSubject, group, updated, in.log); err != nil {
 		return err
 	}
 	return bus.Take(ctx, events.StreamEvents, events.RecordingDeletedSubject, group, deleted, in.log)

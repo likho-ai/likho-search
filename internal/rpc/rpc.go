@@ -54,6 +54,13 @@ func (s *Service) Search(ctx context.Context, req *connect.Request[searchv1.Sear
 	if msg.GetUntil() != nil {
 		query.Until = msg.GetUntil().AsTime()
 	}
+	query.Source, query.Campaign, query.Agent, query.Disposition = msg.GetSource(), msg.GetCampaign(), msg.GetAgent(), msg.GetDisposition()
+	if msg.GetCallSince() != nil {
+		query.CallSince = msg.GetCallSince().AsTime()
+	}
+	if msg.GetCallUntil() != nil {
+		query.CallUntil = msg.GetCallUntil().AsTime()
+	}
 	result, err := s.index.Search(ctx, query)
 	if err != nil {
 		s.log.Error("search failed", "error", err)
@@ -78,6 +85,11 @@ func (s *Service) Search(ctx context.Context, req *connect.Request[searchv1.Sear
 			HighlightScript: hit.HighlightScript,
 			Language:        hit.Language,
 			CreatedAt:       timestamppb.New(unixTime(hit.CreatedAt)),
+			Source:          hit.Source,
+			Campaign:        hit.Campaign,
+			Agent:           hit.Agent,
+			Disposition:     hit.Disposition,
+			CallTime:        callTime(hit.CallTime),
 		})
 	}
 	return connect.NewResponse(response), nil
@@ -113,3 +125,11 @@ func (s *Service) DeleteRecording(ctx context.Context, req *connect.Request[sear
 }
 
 func unixTime(seconds int64) time.Time { return time.Unix(seconds, 0).UTC() }
+
+// callTime is the call's moment, or nil when the recording's facts never arrived.
+func callTime(seconds int64) *timestamppb.Timestamp {
+	if seconds == 0 {
+		return nil
+	}
+	return timestamppb.New(unixTime(seconds))
+}
