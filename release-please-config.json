@@ -1,0 +1,14 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "bootstrap-sha": "450a505a2f71bca915888966d5f8925ca85a0891",
+  "include-component-in-tag": false,
+  "bump-minor-pre-major": true,
+  "bump-patch-for-minor-pre-major": false,
+  "packages": {
+    ".": {
+      "release-type": "go",
+      "package-name": "likho-search",
+      "changelog-path": "CHANGELOG.md"
+    }
+  }
+}
